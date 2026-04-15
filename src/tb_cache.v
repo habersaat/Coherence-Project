@@ -1,29 +1,3 @@
-// =============================================================================
-// tb_cache.v - Directed testbench for the cache module
-//
-// Tests covered:
-//   1. Read miss (cold)       - first access to an address, cache is empty
-//   2. Read hit               - second access to same address, should hit
-//   3. Write hit              - write to a cached address, sets dirty bit
-//   4. Read-back after write  - verify written data is returned correctly
-//   5. Clean eviction         - access address that maps to same index,
-//                               old line is clean so no writeback needed
-//   6. Dirty eviction         - access address that maps to same index,
-//                               old line is dirty so writeback must happen first
-//   7. Write miss             - write to uncached address (write-allocate:
-//                               fetch first, then write)
-//   8. Byte-enable writes     - partial word writes using wstrb
-//
-// How direct-mapped conflict works in this cache:
-//   index = addr[3:2], so addresses 0x00, 0x10, 0x20, 0x30... all map to
-//   index 0. Accessing 0x10 after caching 0x00 forces an eviction of line 0.
-//
-// Memory model:
-//   Simple array that responds in 1 cycle (mem_ready goes high the cycle
-//   after mem_valid). Prints a message on every read and write so you can
-//   see what the cache is doing to memory.
-// =============================================================================
-
 `timescale 1ns/1ps
 
 module tb_cache;

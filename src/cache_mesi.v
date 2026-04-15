@@ -1,4 +1,4 @@
-module cache_msi (
+module cache_mesi (
     input clk,
     input resetn,
 
@@ -62,7 +62,22 @@ module cache_msi (
     // bus transaction (e.g. writing back an M-state line before releasing it)
     // Memory waits until snoop_busy is clear before responding
     // -------------------------------------------------------------------------
-    output wire snoop_busy
+    output wire snoop_busy,
+
+    // -------------------------------------------------------------------------
+    // MESI additions
+    // snoop_shared: asserted when we hold an S or E copy of the BusRd-snooped
+    //   address. Top-level ORs all four to produce bus_resp_excl for requester.
+    // bus_resp_excl: asserted by top-level when no cache drove snoop_shared,
+    //   meaning this requester is the sole reader and should receive E not S.
+    // -------------------------------------------------------------------------
+    output wire snoop_shared,
+    input       bus_resp_excl,
+
+    // silent_upgrade: pulses high for one cycle when a write hits an E-state
+    // line in COMPARE and silently upgrades to M without any bus transaction.
+    // that would have been BusUpgr under MSI but was eliminated by E state.
+    output wire silent_upgrade
 );
 
     // -------------------------------------------------------------------------
@@ -73,11 +88,12 @@ module cache_msi (
     localparam BUS_UPGR = 2'd2;  // upgrade S->M, already have data
 
     // -------------------------------------------------------------------------
-    // MSI coherence state encoding (per cache line)
+    // MESI coherence state encoding (per cache line)
     // -------------------------------------------------------------------------
-    localparam MSI_I = 2'd0;  // Invalid  - no valid copy
-    localparam MSI_S = 2'd1;  // Shared   - read-only copy, memory up to date
-    localparam MSI_M = 2'd2;  // Modified - exclusive copy, memory may be stale
+    localparam MSI_I = 2'd0;  // Invalid   - no valid copy
+    localparam MSI_S = 2'd1;  // Shared    - read-only, others may also have copies
+    localparam MSI_M = 2'd2;  // Modified  - exclusive dirty copy, memory stale
+    localparam MSI_E = 2'd3;  // Exclusive - sole clean copy, silent upgrade to M on write
 
     // -------------------------------------------------------------------------
     // Cache controller FSM states
@@ -150,8 +166,9 @@ module cache_msi (
             && (tag[latched_index] == latched_tag)
             && (msi_state[latched_index] != MSI_I);
 
-    // Write hit: have the line AND have write permission (M state only)
-    wire write_hit = hit && (msi_state[latched_index] == MSI_M);
+    // Write hit: have the line AND have write permission (M state, or E for silent upgrade)
+    wire write_hit = hit && (msi_state[latched_index] == MSI_M
+                          || msi_state[latched_index] == MSI_E);
 
     // Read hit: S or M both permit reads
     wire read_hit = hit;
@@ -186,6 +203,27 @@ module cache_msi (
                          && msi_state[snoop_index] == MSI_M
                          && (snoop_type == BUS_RD || snoop_type == BUS_RDX));
 
+    // snoop_shared: driven high when we have an S or E copy of the snooped address
+    // on a BusRd. Top-level ORs across all four caches to tell the requester
+    // whether anyone already has a copy (requester gets S) or not (requester gets E).
+    assign snoop_shared = snoop_valid
+                       && (snoop_type == BUS_RD)
+                       && (snoop_core != core_id)
+                       && valid[snoop_index]
+                       && (tag[snoop_index] == snoop_tag)
+                       && (msi_state[snoop_index] == MSI_S
+                        || msi_state[snoop_index] == MSI_E);
+
+    // silent_upgrade: high for exactly one cycle when COMPARE detects a write
+    // to an E-state line. write_hit includes E (see above), and the FSM
+    // immediately moves to DONE, so this is a single-cycle combinational pulse.
+    // Under MSI this is always 0 (no E state). Under MESI it counts the bus
+    // transactions saved vs MSI.
+    assign silent_upgrade = (state == COMPARE)
+                          && (latched_wstrb != 4'b0000)
+                          && write_hit
+                          && (msi_state[latched_index] == MSI_E);
+
     // -------------------------------------------------------------------------
     // Reset + state machine (one always block - see cache.v for why)
     // -------------------------------------------------------------------------
@@ -219,12 +257,25 @@ module cache_msi (
             // writeback, so those are handled inside each case state where
             // we can also capture mi_snoop_* and set return_state before MI.
             // -----------------------------------------------------------------
+            // S-state invalidation: on BusRdX or BusUpgr, drop our shared copy to I.
+            // Memory is up to date for S lines - no writeback needed.
             if (snoop_match
                     && msi_state[snoop_index] == MSI_S
                     && (snoop_type == BUS_RDX || snoop_type == BUS_UPGR)) begin
-                // Another core wants exclusive access to a line we hold read-only.
-                // Just invalidate - no writeback, no state machine change.
                 msi_state[snoop_index] <= MSI_I;
+            end
+
+            // E-state reactions (MESI): memory is up to date, no writeback needed.
+            //   BusRd  -> E->S: another core is now reading; we downgrade to shared.
+            //             (snoop_shared fires combinatorially, telling requester -> S)
+            //   BusRdX -> E->I: another core wants exclusive; we fully vacate.
+            //   BusUpgr is architecturally impossible on an E line (no one else
+            //   has S to upgrade from) but handled defensively as E->I.
+            if (snoop_match && msi_state[snoop_index] == MSI_E) begin
+                if (snoop_type == BUS_RD)
+                    msi_state[snoop_index] <= MSI_S;
+                else
+                    msi_state[snoop_index] <= MSI_I;
             end
 
             case (state)
@@ -404,12 +455,13 @@ module cache_msi (
                         return_state   <= IS;
                         state          <= MI;
                     end else if (bus_resp_valid) begin
-                        // Memory responded. Store the new line as a clean shared copy.
+                        // Memory responded. Grant E if no other cache has a copy
+                        // (bus_resp_excl asserted), S otherwise.
                         data[latched_index]      <= bus_resp_data;
                         tag[latched_index]       <= latched_tag;
                         valid[latched_index]     <= 1;
                         dirty[latched_index]     <= 0;
-                        msi_state[latched_index] <= MSI_S;
+                        msi_state[latched_index] <= bus_resp_excl ? MSI_E : MSI_S;
                         bus_req                  <= 0;
                         bus_req_valid            <= 0;
                         state                    <= DONE;
@@ -513,13 +565,15 @@ module cache_msi (
                         // Read - return the cached word
                         core_rdata <= data[latched_index];
                     end else begin
-                        // Write - apply byte enables, mark line dirty
+                        // Write - apply byte enables, mark line dirty, set M state.
+                        // Explicitly setting MSI_M handles E->M silent upgrade and
+                        // is idempotent when already in M (from IM or SM path).
                         if (latched_wstrb[0]) data[latched_index][ 7: 0] <= latched_wdata[ 7: 0];
                         if (latched_wstrb[1]) data[latched_index][15: 8] <= latched_wdata[15: 8];
                         if (latched_wstrb[2]) data[latched_index][23:16] <= latched_wdata[23:16];
                         if (latched_wstrb[3]) data[latched_index][31:24] <= latched_wdata[31:24];
-                        dirty[latched_index] <= 1;
-                        // msi_state is already MSI_M - set in IM or SM before DONE
+                        dirty[latched_index]     <= 1;
+                        msi_state[latched_index] <= MSI_M;
                     end
                     state <= IDLE;
                 end

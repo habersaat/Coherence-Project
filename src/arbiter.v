@@ -1,14 +1,3 @@
-// =============================================================================
-// arbiter.v - Round-robin bus arbiter for 4 cache controllers
-//
-// Grants bus access to one core at a time. After each grant, priority rotates
-// to the next core so no core can starve.
-//
-// Grant is held stable until the winning core drops its req bit (releases bus).
-// One-hot encoding: grant[i] = 1 means core i currently owns the bus.
-// grant_valid = OR of all grant bits, high when any core holds the bus.
-// =============================================================================
-
 module arbiter (
     input            clk,
     input            resetn,

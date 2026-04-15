@@ -1,15 +1,3 @@
-// =============================================================================
-// tb_arbiter.v - Directed testbench for round-robin arbiter
-//
-// Resets between each test to get clean priority state (priority=0).
-//
-// Tests covered:
-//   1. Single requester         - only core 2 requests, should get grant
-//   2. Simultaneous requests    - cores 1,2,3 all request, verify round-robin
-//   3. All four cores           - all request, verify full round-robin cycle
-//   4. Late arrival             - core joins mid-sequence
-// =============================================================================
-
 `timescale 1ns/1ps
 
 module tb_arbiter;
