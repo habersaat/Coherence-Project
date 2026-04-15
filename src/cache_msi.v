@@ -2,12 +2,10 @@ module cache_msi (
     input clk,
     input resetn,
 
-    // Core ID - tells this controller which grant bit to watch
-    // and which core ID to put on the bus
     input [1:0] core_id,
 
     // -------------------------------------------------------------------------
-    // Core-facing interface (same as cache.v)
+    // Core-facing interface
     // -------------------------------------------------------------------------
     input           core_valid,
     output reg      core_ready,
@@ -17,9 +15,7 @@ module cache_msi (
     output reg [31:0] core_rdata,
 
     // -------------------------------------------------------------------------
-    // Memory-facing interface (same as cache.v)
-    // Cache still talks to memory for WRITEBACK and MI state writebacks,
-    // but only after winning bus arbitration for new fetches
+    // Memory-facing interface
     // -------------------------------------------------------------------------
     output reg        mem_valid,
     input             mem_ready,
@@ -46,21 +42,20 @@ module cache_msi (
     output reg [1:0]  bus_req_core,   // which core issued this (= core_id)
 
     // -------------------------------------------------------------------------
-    // Bus inputs - snooped by this controller always, even when not bus owner
+    // Bus inputs
     // -------------------------------------------------------------------------
     input        snoop_valid,    // a transaction is currently on the bus
     input [1:0]  snoop_type,     // transaction type
     input [31:0] snoop_addr,     // transaction address
     input [1:0]  snoop_core,     // which core issued the transaction
 
-    // Memory response - driven by memory after all snoop reactions complete
+    // Memory response
     input [31:0] bus_resp_data,
     input        bus_resp_valid,
 
     // -------------------------------------------------------------------------
     // Snoop busy - asserted by this controller while it is reacting to a
     // bus transaction (e.g. writing back an M-state line before releasing it)
-    // Memory waits until snoop_busy is clear before responding
     // -------------------------------------------------------------------------
     output wire snoop_busy
 );
@@ -81,26 +76,11 @@ module cache_msi (
 
     // -------------------------------------------------------------------------
     // Cache controller FSM states
-    //
-    // Stable states:
-    //   IDLE      - waiting for core request
-    //   COMPARE   - checking tag/valid/MSI state
-    //   DONE      - serving core, returning to IDLE
-    //
-    // Cache miss states:
-    //   WRITEBACK - flushing dirty line to memory before eviction
-    //   FETCH     - unused in MSI (replaced by IS/IM), kept for completeness
-    //
-    // Transient coherence states:
-    //   IS  - issued BusRd from I, waiting for memory to respond with S copy
-    //   IM  - issued BusRdX from I, waiting for exclusive M copy
-    //   SM  - issued BusUpgr from S, waiting for others to invalidate
-    //   MI  - in M, saw BusRd/BusRdX from another core, writing back to memory
     // -------------------------------------------------------------------------
     localparam IDLE      = 4'd0;
     localparam COMPARE   = 4'd1;
     localparam WRITEBACK = 4'd2;
-    localparam FETCH     = 4'd3;  // unused in MSI design - IS/IM replace it
+    localparam FETCH     = 4'd3;
     localparam DONE      = 4'd4;
     localparam IS        = 4'd5;
     localparam IM        = 4'd6;
@@ -116,25 +96,18 @@ module cache_msi (
     reg [27:0] tag       [0:3];
     reg        valid     [0:3];
     reg        dirty     [0:3];
-    reg [1:0]  msi_state [0:3];  // MSI_I, MSI_S, or MSI_M per line
+    reg [1:0]  msi_state [0:3];
 
     // Saves which FSM state to return to after MI writeback completes.
     // MI can interrupt IDLE, COMPARE, WRITEBACK, IS, IM, or SM.
     reg [3:0] return_state;
 
     // Captured snoop signals at the moment we enter MI.
-    // We cannot use the live snoop_type/snoop_index wires inside MI because
-    // the requesting core may release the bus before our writeback finishes,
-    // collapsing snoop_type to 0 (BUS_RD). We would then incorrectly downgrade
-    // to S instead of invalidating to I on a BusRdX reaction.
-    // Capturing at MI entry freezes the correct values for the duration.
     reg [1:0] mi_snoop_type;
     reg [1:0] mi_snoop_index;
 
     // -------------------------------------------------------------------------
     // Address decomposition
-    // latched_* used throughout state machine (stable across cycles)
-    // snoop_* decoded directly from bus input signals
     // -------------------------------------------------------------------------
     wire [27:0] latched_tag   = latched_addr[31:4];
     wire [1:0]  latched_index = latched_addr[3:2];
@@ -158,7 +131,6 @@ module cache_msi (
 
     // -------------------------------------------------------------------------
     // Latched request registers
-    // PicoRV32 holds outputs stable only until mem_ready - capture in IDLE
     // -------------------------------------------------------------------------
     reg [31:0] latched_addr;
     reg [31:0] latched_wdata;
@@ -166,7 +138,7 @@ module cache_msi (
 
     // -------------------------------------------------------------------------
     // Snoop match: does this bus transaction target an address we hold?
-    // Only react if: valid transaction, from another core, line in S or M
+    // Only react if valid transaction, from another core, line in S or M
     // -------------------------------------------------------------------------
     wire snoop_match = snoop_valid
                     && (snoop_core != core_id)
@@ -178,16 +150,13 @@ module cache_msi (
     // M-state match. A registered snoop_busy arrives one cycle too late - the
     // two-stage memory model would fire bus_resp_valid with stale data before
     // the writeback completes.
-    // High in two cases:
-    //   1. We detected an M-state match this cycle (will enter MI next cycle)
-    //   2. We are already in MI doing the writeback
     assign snoop_busy = (state == MI) ||
                         (snoop_match
                          && msi_state[snoop_index] == MSI_M
                          && (snoop_type == BUS_RD || snoop_type == BUS_RDX));
 
     // -------------------------------------------------------------------------
-    // Reset + state machine (one always block - see cache.v for why)
+    // Reset + state machine (one always block
     // -------------------------------------------------------------------------
     integer i;
     always @(posedge clk) begin
@@ -210,14 +179,6 @@ module cache_msi (
             // -----------------------------------------------------------------
             // S-state invalidation: handled outside the case statement so it
             // fires in every state without duplicating code.
-            //
-            // If another core issues BusRdX or BusUpgr targeting a line we
-            // hold in S, we just drop it to I. No writeback needed - memory
-            // is already up to date for S lines.
-            //
-            // M-state reactions (BusRd/BusRdX on our M line) DO require a
-            // writeback, so those are handled inside each case state where
-            // we can also capture mi_snoop_* and set return_state before MI.
             // -----------------------------------------------------------------
             if (snoop_match
                     && msi_state[snoop_index] == MSI_S

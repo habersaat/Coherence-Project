@@ -125,11 +125,6 @@ module top_mesi_wl6 (
     //   0x14: 10e02023   sw    a4, 256(zero)   <- write shared (0x100)
     //   0x18: ff5ff06f   jal   zero, -12       <- loop back to lw
     //
-    // Note on cache thrashing: with 4 direct-mapped lines, the 4-instruction
-    // inner loop (lw/addi/sw/jal at 0x0C-0x18) maps to indices 3,0,1,2 and
-    // the shared data at 0x100 also maps to index 0 (same as addi at 0x10).
-    // This causes constant evictions but the program still makes forward
-    // progress and generates rich coherence traffic - ideal for the demo.
     // -------------------------------------------------------------------------
     reg [31:0] memory [0:1023];
     initial begin

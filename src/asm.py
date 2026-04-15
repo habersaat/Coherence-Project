@@ -38,7 +38,7 @@ def bne_enc(rs1, rs2, offset):
     m=offset&0x1FFF
     return ((m>>12)&1)<<31 | ((m>>5)&0x3F)<<25 | r(rs2)<<20 | r(rs1)<<15 | (1<<12) | ((m>>1)&0xF)<<8 | ((m>>11)&1)<<7 | 0x63
 
-# ---- Verify against known encodings from top_fpga.v ----
+# Verify against known encodings from top_fpga.v
 assert addi_enc('sp','sp',-16) == 0xff010113, f"{addi_enc('sp','sp',-16):#010x}"
 assert lw_enc('a5',0x100,'zero') == 0x10002783
 assert addi_enc('a4','a5',1)   == 0x00178713
@@ -46,7 +46,7 @@ assert sw_enc('a4',0x100,'zero') == 0x10e02023
 assert jal_enc('zero',-12)     == 0xff5ff06f
 print("Verification passed: all 5 known encodings correct")
 
-# ---- Shared header: ID assignment + chunk address setup ----
+# Shared header for ID assignment & chunk address setup
 # Used by workloads 4 and 5.
 # After this (9 instructions, 0x000-0x020):
 #   s0 = my core ID (0-3)
@@ -68,7 +68,6 @@ def id_and_chunk_header():
 # All cores spin reading the shared variable at 0x100 in a tight loop.
 # After the initial S-state fetch, reads are local cache hits with zero
 # bus traffic. Demonstrates efficient silent sharing in MSI.
-# Expected: low initial BusRd, near-zero everything else.
 def workload2():
     return [
         (lw_enc('t0',0x100,'zero'),  "lw   t0,0x100(zero) # read shared variable"),
@@ -79,7 +78,6 @@ def workload2():
 # All 4 cores write the same address in a tight loop with no reads.
 # Every write requires BusRdX (previous write invalidated local copy).
 # Worst-case MSI coherence scenario - maximizes BusRdX and interventions.
-# Expected: very high BusRdX and interventions, low BusRd/BusUpgr.
 def workload3():
     return [
         (sw_enc('zero',0x100,'zero'), "sw   zero,0x100(zero) # write to shared"),
@@ -122,7 +120,6 @@ def workload5():
     p.append((lw_enc('t0',0,'s1'),          "lw   t0,0(s1)       # [loop] load my[0]"))
     p.append((addi_enc('t3','s0',1),         "addi t3,s0,1        # right_id=my_id+1"))
     p.append((addi_enc('t4','zero',4),       "addi t4,zero,4      # t4=4"))
-    # bne at offset len(p)*4. Target is 2 instructions further (+8 bytes).
     p.append((bne_enc('t3','t4',8),          "bne  t3,t4,+8       # skip wrap if !=4"))
     p.append((addi_enc('t3','zero',0),       "addi t3,zero,0      # wrap: right_id=0"))
     p.append((slli_enc('t4','t3',4),         "slli t4,t3,4        # t4=right_id*16"))
